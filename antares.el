@@ -6,7 +6,7 @@
 ;; Version: 0.3.0
 ;; Package-Requires: ((emacs "27.1"))
 ;; Keywords: convenience, writing, wp
-;; URL: https://github.com/claudiu/antares
+;; URL: https://github.com/ctanas/antares
 
 ;;; Commentary:
 
