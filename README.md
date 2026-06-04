@@ -1,0 +1,164 @@
+# antares.el — distraction-free writing mode for Emacs
+
+Antares is a minor mode for focused, distraction-free writing. It keeps the text body centered on screen, hides everything that isn't the words you're writing, and optionally scrolls the buffer like a typewriter and fades all paragraphs except the one you're in.
+
+## Features
+
+- **Centered body** — text is kept to a fixed column width and centered horizontally using window margins, regardless of how wide the frame is
+- **No fringes** — left and right fringes are hidden while the mode is active
+- **Soft word wrap** — `visual-line-mode` is enabled so long lines wrap at the window edge without inserting hard newlines
+- **Top breathing room** — a configurable number of blank lines is added above the buffer content via an overlay (never written to the file)
+- **Typewriter scrolling** — the current line stays vertically centered at all times; as you write and press Enter, text scrolls upward, exactly like paper feeding through a typewriter
+- **Paragraph focus** — all paragraphs except the one point is in are faded to a dimmer color, keeping your eye on what you are writing
+
+All changes are fully restored when the mode is turned off.
+
+## Installation
+
+Copy `antares.el` to somewhere on your `load-path`, then:
+
+```elisp
+(require 'antares)
+```
+
+Or with `use-package`:
+
+```elisp
+(use-package antares
+  :load-path "path/to/antares")
+```
+
+## Usage
+
+```
+M-x antares-mode          toggle in the current buffer
+M-x global-antares-mode   toggle in all buffers
+```
+
+To enable automatically for a specific mode:
+
+```elisp
+(add-hook 'text-mode-hook #'antares-mode)
+(add-hook 'org-mode-hook  #'antares-mode)
+```
+
+## Customization
+
+All variables belong to the `antares` customize group:
+
+```
+M-x customize-group RET antares RET
+```
+
+---
+
+### `antares-body-width`
+
+**Type:** integer
+**Default:** `80`
+
+The target width of the text body in columns. Antares computes the window margin as `(window-width - antares-body-width) / 2` and sets both the left and right margin to that value. If the window is narrower than `antares-body-width`, the margin is simply 0 and no centering is applied.
+
+```elisp
+(setq antares-body-width 72)   ; narrower, more book-like
+(setq antares-body-width 100)  ; wider
+```
+
+---
+
+### `antares-top-lines`
+
+**Type:** integer
+**Default:** `2`
+
+Number of blank lines inserted above the buffer content as visual breathing room. These lines are added via an overlay and are never written to the file. Set to `0` to remove the top padding entirely.
+
+```elisp
+(setq antares-top-lines 0)   ; no top padding
+(setq antares-top-lines 4)   ; more space at the top
+```
+
+---
+
+### `antares-typewriter`
+
+**Type:** boolean
+**Default:** `t`
+
+When non-nil, the current line is always kept vertically centered in the window. After every command, Emacs scrolls the window so point sits at the middle row. As you type and lines accumulate, the earlier text scrolls upward — the same way paper moves through a typewriter.
+
+Set to `nil` to allow normal Emacs scrolling while keeping the other antares features active.
+
+```elisp
+(setq antares-typewriter nil)   ; disable typewriter scrolling
+```
+
+---
+
+### `antares-typewriter-skip-commands`
+
+**Type:** list of symbols
+**Default:** `'(mwheel-scroll scroll-up scroll-up-command scroll-down scroll-down-command scroll-left scroll-right)`
+
+Commands that do **not** trigger typewriter re-centering. Mouse wheel and keyboard scroll commands are listed here by default so you can freely scroll up to read earlier text. The view snaps back to center only when you resume editing.
+
+Add any other scroll or navigation command that you want to exempt:
+
+```elisp
+(add-to-list 'antares-typewriter-skip-commands 'my-custom-scroll-fn)
+```
+
+---
+
+### `antares-dim-others`
+
+**Type:** boolean
+**Default:** `t`
+
+When non-nil, all text outside the current paragraph is faded using the `antares-dim` face. Only the paragraph point is in is shown at full brightness. The dimmed regions are updated after every command, so focus follows the cursor as you move between paragraphs.
+
+Set to `nil` to keep all text at the same brightness.
+
+```elisp
+(setq antares-dim-others nil)   ; disable paragraph dimming
+```
+
+---
+
+### `antares-dim` (face)
+
+The face applied to all paragraphs except the current one when `antares-dim-others` is non-nil. Defaults to a dark grey on dark backgrounds and a light grey on light backgrounds.
+
+Customize it to match your theme:
+
+```elisp
+;; Example: slightly transparent feel on a dark theme
+(set-face-attribute 'antares-dim nil :foreground "#555555")
+
+;; Example: more aggressive fade on a light theme
+(set-face-attribute 'antares-dim nil :foreground "#d8d8d8")
+```
+
+Or via `M-x customize-face RET antares-dim RET`.
+
+---
+
+## Example configuration
+
+```elisp
+(use-package antares
+  :load-path "~/elisp/antares"
+  :hook ((org-mode text-mode markdown-mode) . antares-mode)
+  :custom
+  (antares-body-width  80)
+  (antares-top-lines    2)
+  (antares-typewriter   t)
+  (antares-dim-others   t))
+```
+
+To change only the dim color without touching other faces:
+
+```elisp
+(with-eval-after-load 'antares
+  (set-face-attribute 'antares-dim nil :foreground "#3a3a3a"))
+```
