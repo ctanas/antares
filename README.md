@@ -1,6 +1,6 @@
 # antares.el — distraction-free writing mode for Emacs
 
-Antares is a minor mode for focused, distraction-free writing. It keeps the text body centered on screen, hides everything that isn't the words you're writing, and optionally scrolls the buffer like a typewriter and fades all paragraphs except the one you're in.
+Antares is a minor mode for focused, distraction-free writing in Emacs. It keeps the text body centered on screen, hides everything that isn't the words you're writing, and optionally scrolls the buffer like a typewriter and fades all paragraphs except the one you're in. Inspired by [Olivetti](https://github.com/rnkn/olivetti).
 
 ![Antares in action — the current paragraph stays in focus while earlier paragraphs fade out; mode line shows live character and word counts](images/antares.png)
 
