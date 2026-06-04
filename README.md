@@ -10,6 +10,7 @@ Antares is a minor mode for focused, distraction-free writing. It keeps the text
 - **Top breathing room** — a configurable number of blank lines is added above the buffer content via an overlay (never written to the file)
 - **Typewriter scrolling** — the current line stays vertically centered at all times; as you write and press Enter, text scrolls upward, exactly like paper feeding through a typewriter
 - **Paragraph focus** — all paragraphs except the one point is in are faded to a dimmer color, keeping your eye on what you are writing
+- **Word and character count** — current totals are shown in the mode line; set a word or character goal and the mode line appends progress as a percentage
 
 All changes are fully restored when the mode is turned off.
 
@@ -41,6 +42,18 @@ To enable automatically for a specific mode:
 (add-hook 'text-mode-hook #'antares-mode)
 (add-hook 'org-mode-hook  #'antares-mode)
 ```
+
+### Goals
+
+Antares always shows `C:N W:M` (characters and words) in the mode line while the mode is active. Set a goal to see progress as a percentage alongside:
+
+```
+M-x antares-target-words RET 1500 RET   set a 1500-word goal
+M-x antares-target-chars RET 5000 RET   set a 5000-character goal
+M-x antares-target-words RET 0    RET   clear the goal (same with antares-target-chars)
+```
+
+Goals are buffer-local. Setting a word goal clears any active character goal and vice versa.
 
 ## Customization
 
@@ -121,6 +134,21 @@ Set to `nil` to keep all text at the same brightness.
 
 ```elisp
 (setq antares-dim-others nil)   ; disable paragraph dimming
+```
+
+---
+
+### `antares-global-modes`
+
+**Type:** list of symbols
+**Default:** `'(text-mode)`
+
+Major modes (or their derivatives) in which `global-antares-mode` activates. Each entry is checked with `derived-mode-p`, so subclasses like `markdown-mode` and `org-mode` (both derived from `text-mode`) are picked up automatically. The minibuffer and internal buffers whose name begins with a space are always excluded.
+
+```elisp
+(setq antares-global-modes '(text-mode))             ; only text modes (default)
+(setq antares-global-modes '(text-mode prog-mode))   ; also programming buffers
+(setq antares-global-modes nil)                       ; everywhere
 ```
 
 ---
