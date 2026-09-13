@@ -3,7 +3,7 @@
 ;; Copyright (C) 2026 Claudiu
 
 ;; Author: Claudiu
-;; Version: 0.3.0
+;; Version: 0.4.0
 ;; Package-Requires: ((emacs "27.1"))
 ;; Keywords: convenience, writing, wp
 ;; URL: https://github.com/ctanas/antares
@@ -20,8 +20,9 @@
 ;; times — as you write and lines accumulate, text scrolls upward, just
 ;; like paper feeding through a typewriter.
 ;;
-;; Dimming fades all lines except the one point is on, keeping your eye
-;; on exactly what you are writing.
+;; Dimming fades every paragraph except the one point is in, keeping your
+;; eye on exactly what you are writing.  Paragraphs are separated by
+;; blank lines.
 ;;
 ;; Usage:
 ;;   M-x antares-mode         toggle in current buffer
@@ -31,9 +32,13 @@
 ;;   antares-body-width    - target text column width (default 80)
 ;;   antares-top-lines     - blank lines added above text (default 2)
 ;;   antares-typewriter    - keep current line vertically centered (default t)
-;;   antares-dim-others    - fade all lines except current (default t)
+;;   antares-dim-others    - fade all paragraphs except current (default t)
 
 ;;; Code:
+
+;; Defined in face-remap.el, which is loaded whenever `text-scale-mode' is on.
+(defvar text-scale-mode-step)
+(defvar text-scale-mode-amount)
 
 (defgroup antares nil
   "Distraction-free writing mode."
@@ -57,7 +62,10 @@ As new lines are added the text scrolls upward, like paper through a typewriter.
   :group 'antares)
 
 (defcustom antares-dim-others t
-  "When non-nil, fade every line except the one point is on."
+  "When non-nil, fade every paragraph except the one point is in.
+Paragraphs are runs of non-blank lines separated by blank lines, so in
+a buffer without blank lines the whole buffer is one paragraph and
+nothing is faded."
   :type 'boolean
   :group 'antares)
 
@@ -71,68 +79,66 @@ except the minibuffer and internal whitespace-prefixed buffers."
   :group 'antares)
 
 (defcustom antares-typewriter-skip-commands
-  '(mwheel-scroll
-    pixel-scroll-precision-scroll
-    scroll-up scroll-up-command
-    scroll-down scroll-down-command
-    scroll-left scroll-right)
+  '(scroll-left scroll-right
+    recenter-top-bottom
+    scroll-bar-toolkit-scroll scroll-bar-drag
+    scroll-bar-scroll-up scroll-bar-scroll-down
+    mouse-drag-region mouse-set-point mouse-set-region)
   "Commands that do not trigger typewriter re-centering.
-Mouse wheel and keyboard scroll commands are listed here by default so
-the user can freely scroll to read earlier text; the view snaps back to
-center only when editing resumes.
-Commands with the `scroll-command' symbol property are also skipped
-automatically, so most scroll commands are covered without listing them."
+Scroll bar and horizontal scroll commands are listed so the user can
+scroll freely to read earlier text; mouse commands are listed so text
+does not jump under the mouse while clicking; `recenter-top-bottom' is
+listed so its top/middle/bottom cycling keeps working.
+Commands with the `scroll-command' symbol property, such as
+`mwheel-scroll', `pixel-scroll-precision' and `scroll-up-command', are
+always skipped and need not be listed.
+Independently of this list, re-centering only happens after commands
+that move point or change the buffer text, so a scrolled view is kept
+until the user resumes moving or editing."
   :type '(repeat symbol)
   :group 'antares)
 
 ;;; Faces
 
 (defface antares-dim
-  '((((background dark))  :foreground "#4a4a4a")
-    (((background light)) :foreground "#c0c0c0"))
-  "Face applied to all text except the current line in `antares-mode'."
+  '((((class color) (min-colors 88) (background dark))  :foreground "#4a4a4a")
+    (((class color) (min-colors 88) (background light)) :foreground "#c0c0c0")
+    (t :inherit shadow))
+  "Face applied to every paragraph except the current one in `antares-mode'."
   :group 'antares)
 
 ;;; Internal state (all buffer-local)
 
-(defvar-local antares--saved-margins nil
-  "Window margins before `antares-mode' was enabled, per window.
-Alist of (WINDOW . (LEFT . RIGHT)).")
-
-(defvar-local antares--saved-fringes nil
-  "Fringe widths before `antares-mode' was enabled, per window.
-Alist of (WINDOW . FRINGE-LIST) where FRINGE-LIST is from `window-fringes'.")
+(defvar-local antares--active nil
+  "Non-nil while the settings applied by `antares--enable' are in effect.
+The body of `antares-mode' runs on every call, even when the mode is
+already on (e.g. when both `text-mode-hook' and `org-mode-hook' call
+it), so this flag keeps setup and teardown from running twice.")
 
 (defvar-local antares--enabled-visual-line nil
   "Non-nil if `antares-mode' turned on `visual-line-mode' in this buffer.")
 
-(defvar-local antares--saved-word-wrap nil
-  "Saved state of `word-wrap' before `antares-mode' was enabled.
-nil      — no save (mode is off);
-`global' — variable had no buffer-local binding;
-(local . VALUE) — variable was buffer-local with VALUE.")
-
-(defvar-local antares--saved-truncate-lines nil
-  "Saved state of `truncate-lines' before `antares-mode' was enabled.
-Encoded the same way as `antares--saved-word-wrap'.")
-
 (defvar-local antares--disabled-line-numbers nil
   "Non-nil if `antares-mode' turned off `display-line-numbers-mode'.")
-
-(defvar-local antares--enabled-cursor-intangible nil
-  "Non-nil if `antares-mode' turned on `cursor-intangible-mode'.")
 
 (defvar-local antares--stats-timer nil
   "Idle timer used to defer stats recomputation off the keystroke path.")
 
-(defvar-local antares--top-overlay nil
-  "Overlay that inserts blank lines above buffer content.")
+(defvar-local antares--stats-state nil
+  "Buffer state that `antares--stats' was last computed for.
+A list (CHARS-MODIFIED-TICK POINT-MIN POINT-MAX), used to skip
+recounting when nothing that affects the counts has changed.")
+
+(defvar-local antares--typewriter-state nil
+  "Window, point and text state after the previous command.
+A list (WINDOW POINT CHARS-MODIFIED-TICK); typewriter re-centering is
+skipped after commands that leave all three unchanged.")
 
 (defvar-local antares--dim-before nil
-  "Overlay covering text before the current line (dimmed).")
+  "Overlay covering text before the current paragraph (dimmed).")
 
 (defvar-local antares--dim-after nil
-  "Overlay covering text after the current line (dimmed).")
+  "Overlay covering text after the current paragraph (dimmed).")
 
 (defvar-local antares--stats ""
   "Mode-line string showing character and word counts.")
@@ -145,6 +151,10 @@ Encoded the same way as `antares--saved-word-wrap'.")
 
 ;;; Horizontal centering
 
+(defun antares--windows ()
+  "Return the live windows showing the current buffer, on all frames."
+  (get-buffer-window-list (current-buffer) nil t))
+
 (defun antares--scaled-body-width ()
   "Return `antares-body-width' adjusted for the current text scale factor.
 When text is scaled up the characters are wider, so the body occupies
@@ -156,31 +166,41 @@ at `antares-body-width' characters."
     antares-body-width))
 
 (defun antares--margin-for-window (win)
-  "Compute the left/right margin to center text in WIN."
-  (max 0 (/ (- (window-total-width win) (antares--scaled-body-width)) 2)))
+  "Compute the left/right margin that centers the text body in WIN.
+Scroll bars and window dividers are excluded from the available width,
+so the text area itself comes out `antares-body-width' columns wide."
+  (let* ((char-width (frame-char-width (window-frame win)))
+         (decorations (ceiling (+ (window-scroll-bar-width win)
+                                  (window-right-divider-width win))
+                               char-width))
+         (available (- (window-total-width win) decorations)))
+    (max 0 (/ (- available (antares--scaled-body-width)) 2))))
 
 (defun antares--apply-to-window (win)
-  "Apply centering and fringe settings to WIN.
-Lazily saves the window's original margins and fringes the first time
-WIN is seen, so windows that start showing the buffer after
-`antares--enable' are still restored correctly on disable."
-  (unless (assq win antares--saved-margins)
-    (push (cons win (window-margins win)) antares--saved-margins))
-  (unless (assq win antares--saved-fringes)
-    (push (cons win (window-fringes win)) antares--saved-fringes))
+  "Center the text body in WIN and hide its fringes."
   (let ((m (antares--margin-for-window win)))
     (set-window-margins win m m))
   (set-window-fringes win 0 0))
 
+(defun antares--restore-window (win)
+  "Reset WIN's margins and fringes to the current buffer's defaults.
+These are the values `set-window-buffer' installs, so this undoes
+`antares--apply-to-window' without having to remember prior state."
+  (set-window-margins win left-margin-width right-margin-width)
+  (set-window-fringes win left-fringe-width right-fringe-width
+                      fringes-outside-margins))
+
 (defun antares--reapply ()
   "Reapply antares settings to all windows showing the current buffer."
-  (when (bound-and-true-p antares-mode)
-    (dolist (win (get-buffer-window-list (current-buffer) nil t))
+  (when antares--active
+    (dolist (win (antares--windows))
       (antares--apply-to-window win))))
 
-(defun antares--on-size-change (_frame)
-  "Reapply margins when a frame is resized."
-  (antares--reapply))
+(defun antares--on-size-change (win)
+  "Recenter the text body in WIN after its size changed.
+Buffer-local `window-size-change-functions' receive the window."
+  (when antares--active
+    (antares--apply-to-window win)))
 
 ;;; Top padding overlay
 
@@ -191,17 +211,8 @@ narrowed does not strand the padding in the middle of the buffer."
   (let ((ov (save-restriction
               (widen)
               (make-overlay (point-min) (point-min)))))
-    (overlay-put ov 'before-string
-                 (propertize (make-string antares-top-lines ?\n)
-                             'cursor-intangible t))
-    (overlay-put ov 'antares t)
-    (setq antares--top-overlay ov)))
-
-(defun antares--remove-top-overlay ()
-  "Delete the top-padding overlay."
-  (when antares--top-overlay
-    (delete-overlay antares--top-overlay)
-    (setq antares--top-overlay nil)))
+    (overlay-put ov 'before-string (make-string antares-top-lines ?\n))
+    (overlay-put ov 'antares t)))
 
 ;;; Typewriter scrolling
 
@@ -213,38 +224,69 @@ buffer), since `recenter' would error in that case."
   (when (eq (current-buffer) (window-buffer (selected-window)))
     (recenter)))
 
+(defun antares--maybe-typewriter-scroll ()
+  "Recenter if the last command moved point or changed the text.
+Commands that leave the window, point and text as they were, such as
+saving or quitting, do not re-center, so a view the user scrolled to
+is kept until they resume moving or editing."
+  (let ((state (list (selected-window) (point) (buffer-chars-modified-tick))))
+    (unless (or (equal state antares--typewriter-state)
+                (use-region-p)
+                (memq this-command antares-typewriter-skip-commands)
+                (and (symbolp this-command)
+                     (get this-command 'scroll-command)))
+      (antares--typewriter-scroll))
+    (setq antares--typewriter-state state)))
+
 ;;; Dimming
+
+(defconst antares--blank-line-regexp "^[ \t\f\r]*$"
+  "Regexp matching a blank line, which separates paragraphs.")
 
 (defun antares--make-dim-overlay (beg end)
   "Create a dim overlay from BEG to END."
   (let ((ov (make-overlay beg end nil t nil)))
     (overlay-put ov 'face 'antares-dim)
     (overlay-put ov 'priority 50)
-    (overlay-put ov 'antares-dim t)
+    (overlay-put ov 'antares t)
     ov))
+
+(defun antares--place-dim-overlay (ov beg end)
+  "Make dim overlay OV cover BEG to END and return it.
+Creates the overlay when OV is nil.  When the range is empty, deletes
+OV and returns nil.  The overlay is only moved when its bounds change,
+since moving an overlay makes redisplay reconsider the text it covers."
+  (cond
+   ((>= beg end)
+    (when ov
+      (delete-overlay ov))
+    nil)
+   ((not ov)
+    (antares--make-dim-overlay beg end))
+   (t
+    (unless (and (eq (overlay-buffer ov) (current-buffer))
+                 (= (overlay-start ov) beg)
+                 (= (overlay-end ov) end))
+      (move-overlay ov beg end (current-buffer)))
+    ov)))
 
 (defun antares--paragraph-bounds ()
   "Return (START . END) of the paragraph around point.
 A paragraph is a contiguous run of non-blank lines.  When point is on
-a blank line, returns (point . point) so nothing is highlighted."
+a blank line, the range is empty so nothing is highlighted."
   (save-excursion
     (beginning-of-line)
-    (if (looking-at "[[:space:]]*$")
-        ;; On a blank line — no paragraph to highlight
-        (let ((p (point))) (cons p p))
-      ;; Walk up until we hit a blank line or the top of the buffer
-      (while (and (not (bobp))
-                  (not (looking-at "[[:space:]]*$")))
-        (forward-line -1))
-      (let ((lo (if (looking-at "[[:space:]]*$")
-                    (progn (forward-line 1) (point))
-                  (point))))
-        ;; Walk down from lo until we hit a blank line or the bottom
-        (goto-char lo)
-        (while (and (not (eobp))
-                    (not (looking-at "[[:space:]]*$")))
-          (forward-line 1))
-        (cons lo (point))))))
+    (if (looking-at-p antares--blank-line-regexp)
+        (cons (point) (point))
+      (let ((bol (point)))
+        (cons (if (re-search-backward antares--blank-line-regexp nil t)
+                  (line-beginning-position 2)
+                (point-min))
+              (progn
+                (goto-char bol)
+                (if (re-search-forward antares--blank-line-regexp nil t)
+                    (match-beginning 0)
+                  (point-max))))))))
 
 (defun antares--update-dim ()
   "Reposition dim overlays around the current paragraph.
@@ -258,22 +300,10 @@ selection so that selected text is never hidden by the dim overlay."
     (when (use-region-p)
       (setq lo (min lo (region-beginning))
             hi (max hi (region-end))))
-    ;; Region before current paragraph
-    (if (<= lo (point-min))
-        (when antares--dim-before
-          (delete-overlay antares--dim-before)
-          (setq antares--dim-before nil))
-      (if antares--dim-before
-          (move-overlay antares--dim-before (point-min) lo)
-        (setq antares--dim-before (antares--make-dim-overlay (point-min) lo))))
-    ;; Region after current paragraph
-    (if (>= hi (point-max))
-        (when antares--dim-after
-          (delete-overlay antares--dim-after)
-          (setq antares--dim-after nil))
-      (if antares--dim-after
-          (move-overlay antares--dim-after hi (point-max))
-        (setq antares--dim-after (antares--make-dim-overlay hi (point-max)))))))
+    (setq antares--dim-before
+          (antares--place-dim-overlay antares--dim-before (point-min) lo)
+          antares--dim-after
+          (antares--place-dim-overlay antares--dim-after hi (point-max)))))
 
 (defun antares--remove-dim-overlays ()
   "Delete both dim overlays."
@@ -286,10 +316,15 @@ selection so that selected text is never hidden by the dim overlay."
 
 ;;; Stats (character and word count)
 
+(defun antares--stats-inputs ()
+  "Return the buffer state that the character and word counts depend on."
+  (list (buffer-chars-modified-tick) (point-min) (point-max)))
+
 (defun antares--update-stats ()
   "Recompute character and word counts and refresh the mode-line string.
 The mode line is only forced to redraw when the formatted string has
 actually changed, to avoid extra redisplay work on every command."
+  (setq antares--stats-state (antares--stats-inputs))
   (let* ((chars (- (point-max) (point-min)))
          (words (count-words (point-min) (point-max)))
          (pct   (cond
@@ -304,15 +339,17 @@ actually changed, to avoid extra redisplay work on every command."
       (force-mode-line-update))))
 
 (defun antares--schedule-stats ()
-  "Schedule a stats recompute when Emacs next becomes idle.
-Cancels any previously-queued timer so a burst of keystrokes only
-triggers a single recompute once the user pauses."
-  (when (timerp antares--stats-timer)
-    (cancel-timer antares--stats-timer))
-  (setq antares--stats-timer
-        (run-with-idle-timer 0.3 nil
-                             #'antares--run-stats-timer
-                             (current-buffer))))
+  "Schedule a stats recompute for when Emacs next becomes idle.
+Nothing is scheduled when the counts are already up to date or a
+recompute is already pending.  A pending timer need not be restarted
+on each keystroke: idle time starts over with every input event, so a
+burst of typing still triggers a single recompute once the user pauses."
+  (unless (or (timerp antares--stats-timer)
+              (equal antares--stats-state (antares--stats-inputs)))
+    (setq antares--stats-timer
+          (run-with-idle-timer 0.3 nil
+                               #'antares--run-stats-timer
+                               (current-buffer)))))
 
 (defun antares--run-stats-timer (buf)
   "Stats timer callback for BUF.
@@ -320,7 +357,7 @@ Skips the update if BUF has been killed or has left `antares-mode'."
   (when (buffer-live-p buf)
     (with-current-buffer buf
       (setq antares--stats-timer nil)
-      (when (bound-and-true-p antares-mode)
+      (when antares--active
         (condition-case err
             (antares--update-stats)
           (error (message "antares stats: %s"
@@ -349,157 +386,106 @@ Setting N to 0 clears the goal."
 ;;; Post-command hook (runs after every command)
 
 (defun antares--post-command ()
-  "Drive typewriter scrolling and dimming after each command.
+  "Drive stats, dimming and typewriter scrolling after each command.
 Errors are caught so that a bad state never removes this function
 from `post-command-hook'."
-  (when (bound-and-true-p antares-mode)
+  (when antares--active
     (condition-case err
         (progn
           (antares--schedule-stats)
           (if antares-dim-others
               (antares--update-dim)
-            ;; Toggle handling: clear stale overlays if the user has just
-            ;; turned off `antares-dim-others' from elsewhere.
-            (when (or antares--dim-before antares--dim-after)
-              (antares--remove-dim-overlays)))
-          (when (and antares-typewriter
-                     (not (use-region-p))
-                     (not (memq this-command antares-typewriter-skip-commands))
-                     (not (and (symbolp this-command)
-                               (get this-command 'scroll-command))))
-            (antares--typewriter-scroll)))
+            ;; Clear stale overlays if `antares-dim-others' was just
+            ;; turned off from elsewhere.
+            (antares--remove-dim-overlays))
+          (when antares-typewriter
+            (antares--maybe-typewriter-scroll)))
       (error (message "antares: %s" (error-message-string err))))))
 
 ;;; Enable / disable
 
-(defun antares--save-var (var)
-  "Capture the prior state of VAR so it can be restored on disable.
-Returns `global' when VAR had no buffer-local binding, or
-\(local . VALUE) when it did."
-  (if (local-variable-p var)
-      (cons 'local (symbol-value var))
-    'global))
+(defun antares--turn-off ()
+  "Turn off `antares-mode' in the current buffer."
+  (antares-mode -1))
 
 (defun antares--enable ()
   "Enable antares settings in the current buffer."
-  ;; Per-window state — apply-to-window lazily saves the original
-  ;; margins/fringes the first time each window is seen, so windows
-  ;; that start showing this buffer later are still restored properly.
-  (setq antares--saved-margins nil
-        antares--saved-fringes nil)
-  (dolist (win (get-buffer-window-list (current-buffer) nil t))
+  (setq antares--active t)
+  (dolist (win (antares--windows))
     (antares--apply-to-window win))
 
-  ;; Save prior state of the buffer-locals we are about to override.
-  (setq antares--saved-word-wrap     (antares--save-var 'word-wrap)
-        antares--saved-truncate-lines (antares--save-var 'truncate-lines))
-
-  (setq-local word-wrap t)
-  (setq-local truncate-lines nil)
-
-  ;; Only enable visual-line-mode if it isn't already on, so we know
-  ;; whether to turn it off again on disable.
-  (unless (bound-and-true-p visual-line-mode)
+  ;; `visual-line-mode' sets `word-wrap' and `truncate-lines' itself and
+  ;; restores them when turned off, so only the mode needs tracking.
+  (unless visual-line-mode
     (visual-line-mode 1)
     (setq antares--enabled-visual-line t))
 
   ;; Disable line numbers if the user had them on; remember we did so.
-  (when (and (boundp 'display-line-numbers-mode)
-             (bound-and-true-p display-line-numbers-mode))
+  (when (bound-and-true-p display-line-numbers-mode)
     (display-line-numbers-mode -1)
     (setq antares--disabled-line-numbers t))
 
-  ;; Top padding overlay
   (when (> antares-top-lines 0)
-    (antares--make-top-overlay)
-    (unless (bound-and-true-p cursor-intangible-mode)
-      (cursor-intangible-mode 1)
-      (setq antares--enabled-cursor-intangible t)))
+    (antares--make-top-overlay))
 
   ;; React to window layout / frame size / text scale changes
   (add-hook 'window-configuration-change-hook #'antares--reapply nil t)
   (add-hook 'window-size-change-functions      #'antares--on-size-change nil t)
   (add-hook 'text-scale-mode-hook              #'antares--reapply nil t)
 
-  ;; Typewriter + dimming
+  ;; Stats, typewriter and dimming
   (add-hook 'post-command-hook #'antares--post-command nil t)
+
+  ;; Every major mode (and `revert-buffer') calls `kill-all-local-variables',
+  ;; which resets `antares-mode' without running the mode function and
+  ;; would otherwise leave the overlays and window margins behind.
+  (add-hook 'change-major-mode-hook #'antares--turn-off nil t)
 
   ;; Initial pass
   (antares--update-stats)
-  (when antares-dim-others   (antares--update-dim))
-  (when antares-typewriter   (antares--typewriter-scroll)))
-
-(defun antares--restore-var (var saved)
-  "Restore VAR from SAVED, the value previously stored by `antares--save-var'."
-  (cond
-   ((eq saved 'global) (kill-local-variable var))
-   ((consp saved)      (set (make-local-variable var) (cdr saved)))))
+  (when antares-dim-others (antares--update-dim))
+  (when antares-typewriter (antares--typewriter-scroll)))
 
 (defun antares--disable ()
   "Restore all settings changed by `antares--enable'."
+  (setq antares--active nil)
   (remove-hook 'window-configuration-change-hook #'antares--reapply t)
   (remove-hook 'window-size-change-functions      #'antares--on-size-change t)
   (remove-hook 'text-scale-mode-hook              #'antares--reapply t)
   (remove-hook 'post-command-hook                 #'antares--post-command t)
+  (remove-hook 'change-major-mode-hook            #'antares--turn-off t)
 
   ;; Cancel any pending stats refresh so it does not fire after disable.
   (when (timerp antares--stats-timer)
-    (cancel-timer antares--stats-timer)
-    (setq antares--stats-timer nil))
+    (cancel-timer antares--stats-timer))
+  (setq antares--stats-timer nil)
 
-  ;; Restore per-window margins and fringes.  Iterating the saved
-  ;; alists covers every window we ever applied settings to, including
-  ;; ones opened after `antares--enable' ran.
-  (dolist (cell antares--saved-margins)
-    (let ((win (car cell))
-          (m   (cdr cell)))
-      (when (window-live-p win)
-        (set-window-margins win (car m) (cdr m)))))
-  (dolist (cell antares--saved-fringes)
-    (let ((win (car cell))
-          (f   (cdr cell)))
-      (when (window-live-p win)
-        (set-window-fringes win (car f) (cadr f)
-                            (caddr f) (cadddr f)))))
-  (setq antares--saved-margins nil
-        antares--saved-fringes nil)
+  ;; Only windows still showing this buffer need restoring; any other
+  ;; window had its margins and fringes reset by `set-window-buffer'.
+  (dolist (win (antares--windows))
+    (antares--restore-window win))
 
-  ;; Remove overlays.
-  (antares--remove-top-overlay)
+  ;; Remove the padding and dim overlays, plus any strays left behind.
   (antares--remove-dim-overlays)
+  (save-restriction
+    (widen)
+    (remove-overlays (point-min) (point-max) 'antares t))
 
-  ;; Only turn off cursor-intangible-mode if we were the ones who
-  ;; turned it on, and only if it's still on (so we don't undo a user
-  ;; toggle made during the session).
-  (when (and antares--enabled-cursor-intangible
-             (bound-and-true-p cursor-intangible-mode))
-    (cursor-intangible-mode -1))
-  (setq antares--enabled-cursor-intangible nil)
-
-  ;; Restore visual-line-mode using the same "only if we changed it"
-  ;; convention.
-  (when (and antares--enabled-visual-line
-             (bound-and-true-p visual-line-mode))
+  ;; Only turn off visual-line-mode if we turned it on and it is still on.
+  (when (and antares--enabled-visual-line visual-line-mode)
     (visual-line-mode -1))
   (setq antares--enabled-visual-line nil)
-
-  ;; Restore word-wrap and truncate-lines to their original buffer-
-  ;; local-vs-global states.
-  (antares--restore-var 'word-wrap      antares--saved-word-wrap)
-  (antares--restore-var 'truncate-lines antares--saved-truncate-lines)
-  (setq antares--saved-word-wrap     nil
-        antares--saved-truncate-lines nil)
 
   ;; Restore line numbers only if we disabled them and the user hasn't
   ;; turned them back on themselves in the meantime.
   (when (and antares--disabled-line-numbers
-             (boundp 'display-line-numbers-mode)
              (not (bound-and-true-p display-line-numbers-mode)))
     (display-line-numbers-mode 1))
   (setq antares--disabled-line-numbers nil)
 
-  ;; Clear stats.
-  (setq antares--stats "")
+  (setq antares--stats ""
+        antares--stats-state nil
+        antares--typewriter-state nil)
   (force-mode-line-update))
 
 ;;; Minor mode
@@ -509,14 +495,16 @@ Returns `global' when VAR had no buffer-local binding, or
   "Toggle distraction-free writing mode (Antares mode).
 
 Centers the buffer at `antares-body-width' columns, hides fringes,
-enables soft word-wrap, and optionally:
+turns on `visual-line-mode', and optionally:
 - keeps the current line vertically centered (typewriter scrolling)
-- fades every line except the one point is on"
+- fades every paragraph except the one point is in"
   :lighter " Ant"
   :group 'antares
-  (if antares-mode
-      (antares--enable)
-    (antares--disable)))
+  ;; The body runs on every call, including (antares-mode 1) while the
+  ;; mode is already on, so only act on actual state changes.
+  (cond
+   ((and antares-mode (not antares--active)) (antares--enable))
+   ((and (not antares-mode) antares--active) (antares--disable))))
 
 (defun antares--should-globally-enable-p ()
   "Return non-nil when `global-antares-mode' should activate in this buffer.
